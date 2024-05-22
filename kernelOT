@@ -1,0 +1,199 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from sklearn.metrics.pairwise import rbf_kernel
+
+# Fourier Transform
+def fourier_transform(x):
+    x_np = x.detach().cpu().numpy()
+    x_np = np.fft.fft2(x_np, axes=(-2, -1))
+    return torch.tensor(np.abs(x_np), dtype=torch.float32)
+
+# Gaussian RBF Kernel
+def gaussian_kernel(x, y, sigma=1.0):
+    return np.exp(-np.linalg.norm(x-y)**2 / (2 * (sigma ** 2)))
+
+# Kernelized Optimal Transport Attention (KOTA) Class
+# Kernelized Optimal Transport Attention (KOTA) Class
+class KOTA(nn.Module):
+    def __init__(self, in_features):
+        super(KOTA, self).__init__()
+        self.in_features = in_features
+        self.fc = nn.Linear(in_features, 1)
+
+    def forward(self, source, target):
+        # Compute Fourier transform
+        #print("source data before transformation :",source.size())
+        #print("target data before transformation :",target.size())
+
+        source_ft = fourier_transform(source).contiguous().view(source.size(0), -1)
+        target_ft = fourier_transform(target).contiguous().view(target.size(0), -1)
+
+        my_source_ft = source_ft.numpy()
+        my_target_ft = target_ft.numpy()
+
+        #print("size of my_source_ft",my_source_ft.shape)
+        #print("size of my_target_ft",my_target_ft.shape)
+
+        K = np.zeros((len(my_source_ft), len(my_source_ft)))
+        L = np.zeros((len(my_target_ft), len(my_target_ft)))
+
+        for i in range(len(my_source_ft)):
+            for j in range(len(my_source_ft)):
+                K[i, j] = gaussian_kernel(my_source_ft[i], my_source_ft[j])
+
+        for i in range(len(my_target_ft)):
+            for j in range(len(my_target_ft)):
+                L[i, j] = gaussian_kernel(my_target_ft[i], my_target_ft[j])
+
+        M = np.zeros((len(my_source_ft), len(my_target_ft)))
+        #print(M)
+        for i in range(len(my_source_ft)):
+            for j in range(len(my_target_ft)):
+                M[i, j] = np.linalg.norm(K[i] - L[j])**2
+
+        #print("size of kernal_matrix that is M",M.shape)
+
+        # Optimal Transport Matrix using Sinkhorn iterations
+        def sinkhorn(M):
+
+            return np.ones_like(M) / len(M)
+
+        P = sinkhorn(M)
+
+        #print("size after the sinkhorn matrix or P",P.shape)
+
+        tensor_p=torch.tensor(P, dtype=torch.float32)
+        #print("size of tensor of P",tensor_p.size())
+
+        reshaped_p = tensor_p.repeat(self.in_features, 1, 1)
+        #print("size of reshapes P",reshaped_p.size())
+
+        rtn_p = self.fc(reshaped_p.permute(1, 2, 0)).squeeze()
+        #print("size of rtn_p",rtn_p.size())
+
+        # Attention Scores
+        scores = np.dot(P, L)
+
+        # Compute Context Vector
+        context_vector = np.dot(scores, my_target_ft)
+
+        # Weighted Aggregation
+        final_features = np.sum(my_source_ft * context_vector[:, np.newaxis], axis=0)
+        #print("size of final_feature matrix",final_features.shape)
+
+        tensor_final_features=torch.tensor(final_features, dtype=torch.float32)
+        #print("size of tensor_final_features",tensor_final_features.size())
+
+        reshaped_final_features = tensor_final_features.repeat(self.in_features, 1, 1)
+        #print("size of reahsped_final_features",reshaped_final_features.size())
+
+        small_final_features= self.fc(reshaped_final_features.permute(1, 2, 0)).squeeze()
+        #print("shape of a small_final_feature",small_final_features.size())
+
+        #transport_cost = self.fc(kernel_matrix.permute(1, 2, 0)).squeeze()
+
+
+
+        #print("source data after transformation",source_ft.size())
+        #print("target data after transformation",target_ft.size())
+
+        # Compute Kernel matrix
+        kernel_matrix = rbf_kernel(source_ft.detach().cpu().numpy(), target_ft.detach().cpu().numpy())
+
+        #print("size of a kernal metrix",kernel_matrix.shape)
+
+        # Convert to torch tensor
+        kernel_matrix = torch.tensor(kernel_matrix, dtype=torch.float32)
+
+        #print("size of a kernal metrix tensor ",kernel_matrix.size())
+
+        # Reshape kernel_matrix to (batch_size, in_features)
+        kernel_matrix = kernel_matrix.repeat(self.in_features, 1, 1)
+
+        #print("size of a kernal metrix tensor reshaped",kernel_matrix.size())
+
+        # Compute kernelized optimal transport
+        transport_cost = self.fc(kernel_matrix.permute(1, 2, 0)).squeeze()
+
+        #print("transport cost matrix size is",transport_cost.size())
+
+        return rtn_p
+
+
+# Data loaders
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
+
+# Source and target data
+mnist_train = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
+mnist_test = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
+modified_mnist_train = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
+modified_mnist_test = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
+
+source_loader = torch.utils.data.DataLoader(mnist_train, batch_size=64, shuffle=True)
+target_loader = torch.utils.data.DataLoader(modified_mnist_train, batch_size=64, shuffle=True)
+
+# Initialize KOTA model
+kota_model = KOTA(in_features=mnist_train.data[0].shape[0]*mnist_train.data[0].shape[1])
+optimizer = optim.Adam(kota_model.parameters(), lr=0.001)
+
+# Training loop
+num_epochs = 1
+
+for epoch in range(num_epochs):
+    kota_model.train()
+    batch_counter = 0
+
+    for (source_data, _), (target_data, _) in zip(source_loader, target_loader):
+        optimizer.zero_grad()
+
+        #print(source_data)
+        #tester=source_data
+        # Compute KOTA score
+        kota_score = kota_model(source_data, target_data)
+
+        # Negative KOTA score as loss
+        loss = -kota_score.mean()
+
+        # Backward pass and optimize
+        loss.backward()
+        optimizer.step()
+
+        if batch_counter % 100 == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_counter}/{len(source_loader)}, Loss: {loss.item():.4f}")
+
+        batch_counter += 1
+#print(tester.size())
+# Evaluation
+kota_model.eval()
+
+correct = 0
+total = 0
+counttr=0
+
+with torch.no_grad():
+    for data, target in modified_mnist_test:
+        data_ft = fourier_transform(data).contiguous().view(1, -1)
+        target_ft = fourier_transform(data).contiguous().view(1, -1)
+
+        kota_score = kota_model(data_ft, target_ft)
+        #print(kota_score)
+
+        # Predict using sign of KOTA score
+        predicted = torch.sign(kota_score).int().item()
+
+        #print("Target data is:",target)
+        #counttr=counttr+1
+
+        if predicted == target:
+            correct += 1
+        total += 1
+
+print(f"Accuracy on modified MNIST test set: {(100 * correct / total):.2f}%")
+#print("Number is:",counttr)
+
